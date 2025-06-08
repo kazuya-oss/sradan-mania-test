@@ -50,6 +50,10 @@ export class AudioRecorder extends EventEmitter<AudioRecorderEventMap> {
   vuWorklet: AudioWorkletNode | undefined;
 
   private starting: Promise<void> | null = null;
+  // 53行目あたりの下に追加
+  private silenceTimeout: number | null = null;
+  private lastSoundTime: number = 0;
+  private readonly SILENCE_THRESHOLD = 0.01; // 音量のしきい値
 
   constructor(public sampleRate = 16000) {
     super();
@@ -93,8 +97,27 @@ export class AudioRecorder extends EventEmitter<AudioRecorderEventMap> {
       );
       this.vuWorklet = new AudioWorkletNode(this.audioContext, vuWorkletName);
       this.vuWorklet.port.onmessage = (ev: MessageEvent) => {
-        // @ts-ignore
-        this.emit('volume', ev.data.volume);
+        const volume = ev.data.volume;
+        this.emit('volume', volume);
+
+        // --- ここからが無音検知ロジック ---
+        if (volume > this.SILENCE_THRESHOLD) {
+          this.lastSoundTime = Date.now();
+        }
+
+        if (this.silenceTimeout === null) {
+          const checkSilence = () => {
+            const now = Date.now();
+            if (now - this.lastSoundTime > 2000) { // 2秒間無音だったら
+              console.log('Silence detected, stopping recording.');
+              this.stop(); // 録音を停止
+            } else {
+              this.silenceTimeout = window.setTimeout(checkSilence, 500); // 0.5秒後にもう一度チェック
+            }
+          };
+          this.silenceTimeout = window.setTimeout(checkSilence, 500);
+        }
+        // --- ここまで ---
       };
 
       this.source.connect(this.vuWorklet);
@@ -108,6 +131,8 @@ export class AudioRecorder extends EventEmitter<AudioRecorderEventMap> {
     // It is plausible that stop would be called before start completes,
     // such as if the Websocket immediately hangs up
     const handleStop = () => {
+      if (this.silenceTimeout) clearTimeout(this.silenceTimeout); // この行を追加
+      this.silenceTimeout = null;
       this.source?.disconnect();
       this.stream?.getTracks().forEach(track => track.stop());
       this.stream = undefined;
